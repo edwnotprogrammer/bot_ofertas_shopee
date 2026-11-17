@@ -18,6 +18,7 @@ import hashlib
 import html
 import json
 import os
+import random
 import time
 from pathlib import Path
 
@@ -31,16 +32,30 @@ APP_ID = os.getenv("SHOPEE_APP_ID")
 SECRET = os.getenv("SHOPEE_SECRET")
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
+# Opcional: seu chat privado com o bot, para receber cópias prontas p/ WhatsApp
+TG_CHAT_WA = os.getenv("TELEGRAM_CHAT_ID_WHATSAPP")
+PRODUTOS_WHATSAPP_POR_RODADA = 5  # cópias p/ WhatsApp por rodada
 
 SHOPEE_URL = "https://open-api.affiliate.shopee.com.br/graphql"
 
 DESCONTO_MINIMO = 20          # % mínimo de desconto
 AVALIACAO_MINIMA = 4.5        # nota mínima (0 a 5)
 VENDAS_MINIMAS = 100          # mínimo de vendas
-PRODUTOS_POR_RODADA = 5       # quantos posts por execução
-INTERVALO_ENTRE_POSTS = 60    # segundos entre cada post
+PRODUTOS_POR_RODADA = 5       # ofertas por horário
+INTERVALO_ENTRE_POSTS = int(os.getenv("INTERVALO_ENTRE_POSTS", "60"))  # segundos entre posts
 INTERVALO_ENTRE_RODADAS = 30 * 60  # segundos (30 min)
-PALAVRAS_CHAVE = ["", ]       # ex.: ["fone bluetooth", "air fryer"]; "" = geral
+# Cada item é uma busca. Edite à vontade; "" = geral (mais vendidos de tudo).
+PALAVRAS_CHAVE = [
+    "",                    # geral
+    "air fryer",           # casa
+    "organizador casa",
+    "utensílios cozinha",
+    "fone bluetooth",      # tecnologia
+    "smartwatch",
+    "carregador turbo",
+    "luminária led",
+    "kit ferramentas",     # utilidades
+]
 
 ARQUIVO_POSTADOS = Path("postados.json")
 
@@ -138,20 +153,40 @@ def formatar_preco(valor) -> str:
 
 def montar_legenda(p: dict) -> str:
     nome = html.escape(p["productName"][:120])
-    desconto = int(float(p.get("priceDiscountRate") or 0))
-    preco = formatar_preco(p["priceMin"])
+    taxa = float(p.get("priceDiscountRate") or 0)
+    desconto = int(taxa)
+    preco_atual = float(p["priceMin"])
+    preco = formatar_preco(preco_atual)
+    # A API não informa o preço original: calculamos a partir do desconto
+    if 0 < taxa < 100:
+        preco_antes = formatar_preco(preco_atual / (1 - taxa / 100))
+    else:
+        preco_antes = None
     link = p["offerLink"]
     nota = p.get("ratingStar", "")
     vendas = p.get("sales", "")
 
+    linha_preco = (
+        f"❌ De <s>{preco_antes}</s>\n✅ Por apenas <b>{preco}</b>\n"
+        if preco_antes
+        else f"💰 Por apenas <b>{preco}</b>\n"
+    )
+
     return (
         f"🔥 <b>{nome}</b>\n\n"
-        f"💰 Por apenas <b>{preco}</b>\n"
+        f"{linha_preco}"
         f"📉 {desconto}% OFF\n"
         f"⭐ Nota {nota} | 🛒 {vendas} vendidos\n\n"
         f"👉 <a href=\"{link}\">Ver oferta na Shopee</a>\n\n"
         f"<i>Link de afiliado. Preços e estoque podem mudar a qualquer momento.</i>"
     )
+
+
+def botao_oferta(p: dict) -> str:
+    """Botão clicável abaixo da mensagem (formato JSON exigido pelo Telegram)."""
+    return json.dumps({
+        "inline_keyboard": [[{"text": "🛒 Ver oferta na Shopee", "url": p["offerLink"]}]]
+    })
 
 
 def postar_telegram(p: dict) -> bool:
@@ -163,6 +198,7 @@ def postar_telegram(p: dict) -> bool:
             "photo": p["imageUrl"],
             "caption": montar_legenda(p),
             "parse_mode": "HTML",
+            "reply_markup": botao_oferta(p),
         },
         timeout=30,
     )
@@ -171,19 +207,70 @@ def postar_telegram(p: dict) -> bool:
     return resp.ok
 
 
+# ---------------- CÓPIA PARA WHATSAPP (manual) ----------------
+def montar_texto_whatsapp(p: dict) -> str:
+    """Texto no formato do WhatsApp: *negrito*, ~riscado~."""
+    nome = p["productName"][:120]
+    for simbolo in "*_~":
+        nome = nome.replace(simbolo, "")
+
+    taxa = float(p.get("priceDiscountRate") or 0)
+    preco_atual = float(p["priceMin"])
+    preco = formatar_preco(preco_atual)
+
+    if 0 < taxa < 100:
+        antes = formatar_preco(preco_atual / (1 - taxa / 100))
+        linha_preco = f"❌ De ~{antes}~\n✅ Por apenas *{preco}*\n"
+    else:
+        linha_preco = f"💰 Por apenas *{preco}*\n"
+
+    return (
+        f"🔥 *{nome}*\n\n"
+        f"{linha_preco}"
+        f"📉 {int(taxa)}% OFF\n"
+        f"⭐ Nota {p.get('ratingStar', '')} | 🛒 {p.get('sales', '')} vendidos\n\n"
+        f"👉 Compre aqui: {p['offerLink']}"
+    )
+
+
+def enviar_copia_whatsapp(p: dict) -> None:
+    """Manda foto + texto (sem formatação do Telegram) para o seu chat privado."""
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
+    resp = requests.post(
+        url,
+        data={
+            "chat_id": TG_CHAT_WA,
+            "photo": p["imageUrl"],
+            "caption": montar_texto_whatsapp(p),
+            "reply_markup": botao_oferta(p),
+        },
+        timeout=30,
+    )
+    if not resp.ok:
+        print(f"Falha na cópia p/ WhatsApp {p['itemId']}: {resp.text}")
+
+
 # ---------------- LOOP PRINCIPAL ----------------
 def rodada() -> None:
     postados = carregar_postados()
-    candidatos = []
 
-    for kw in PALAVRAS_CHAVE:
+    # Busca cada categoria e ordena por vendas (mais vendidos primeiro)
+    listas = []
+    for kw in random.sample(PALAVRAS_CHAVE, len(PALAVRAS_CHAVE)):
         try:
-            candidatos += filtrar(buscar_produtos(kw), postados)
+            lista = filtrar(buscar_produtos(kw), postados)
+            lista.sort(key=lambda p: int(p.get("sales") or 0), reverse=True)
+            listas.append(lista)
         except Exception as e:
             print(f"Erro ao buscar '{kw}': {e}")
 
-    # Prioriza maior desconto
-    candidatos.sort(key=lambda p: float(p.get("priceDiscountRate") or 0), reverse=True)
+    # Intercala as categorias (1 de cada por vez) e remove duplicados
+    candidatos, vistos = [], set()
+    for i in range(max((len(l) for l in listas), default=0)):
+        for lista in listas:
+            if i < len(lista) and lista[i]["itemId"] not in vistos:
+                vistos.add(lista[i]["itemId"])
+                candidatos.append(lista[i])
 
     enviados = 0
     for p in candidatos:
@@ -193,6 +280,8 @@ def rodada() -> None:
             postados.add(str(p["itemId"]))
             salvar_postados(postados)
             enviados += 1
+            if TG_CHAT_WA and enviados <= PRODUTOS_WHATSAPP_POR_RODADA:
+                enviar_copia_whatsapp(p)
             print(f"Postado: {p['productName'][:60]}")
             time.sleep(INTERVALO_ENTRE_POSTS)
 
@@ -207,6 +296,10 @@ if __name__ == "__main__":
     if faltando:
         raise SystemExit(f"Defina no .env: {', '.join(faltando)}")
 
-    while True:
+    if os.getenv("RODAR_UMA_VEZ"):
+        # Modo GitHub Actions: executa uma rodada e encerra
         rodada()
-        time.sleep(INTERVALO_ENTRE_RODADAS)
+    else:
+        while True:
+            rodada()
+            time.sleep(INTERVALO_ENTRE_RODADAS)
