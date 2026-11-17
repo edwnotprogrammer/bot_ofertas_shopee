@@ -19,6 +19,7 @@ import html
 import json
 import os
 import random
+import re
 import time
 from pathlib import Path
 from urllib.parse import quote
@@ -36,6 +37,9 @@ TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
 # Opcional: seu chat privado com o bot, para receber cópias prontas p/ WhatsApp
 TG_CHAT_WA = os.getenv("TELEGRAM_CHAT_ID_WHATSAPP")
 PRODUTOS_WHATSAPP_POR_RODADA = 5  # cópias p/ WhatsApp por rodada
+# False = o botão "Enviar para o WhatsApp" manda o texto sem emojis (evita o "�").
+# Se quiser testar com emojis, mude para True.
+EMOJIS_NO_BOTAO_WHATSAPP = False
 
 SHOPEE_URL = "https://open-api.affiliate.shopee.com.br/graphql"
 
@@ -234,17 +238,39 @@ def montar_texto_whatsapp(p: dict, nome_max: int = 120) -> str:
     )
 
 
+def remover_emojis(texto: str) -> str:
+    """Tira emojis e arruma os espaços que sobram."""
+    texto = re.sub(r"[\U0001F000-\U0001FFFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F]", "", texto)
+    texto = re.sub(r"(?m)^ +", "", texto)   # espaço no início das linhas
+    texto = re.sub(r" {2,}", " ", texto)    # espaços duplos
+    return texto.strip()
+
+
+def texto_para_copiar(p: dict) -> str:
+    """Texto completo com emojis. O botão de copiar do Telegram aceita até 256
+    caracteres, então o nome do produto é encurtado se for preciso."""
+    for tamanho in (120, 80, 60, 45, 30, 15, 0):
+        texto = montar_texto_whatsapp(p, tamanho)
+        if len(texto.encode("utf-16-le")) // 2 <= 250:
+            return texto
+    return texto
+
+
 def botao_copia_whatsapp(p: dict) -> str:
     """Botões: abrir o WhatsApp com a mensagem pronta + ver a oferta."""
     # O Telegram aceita links de até ~2000 caracteres; encurta o nome se precisar
     for tamanho in (120, 80, 50, 30):
         texto = montar_texto_whatsapp(p, tamanho)
-        link_wa = "https://wa.me/?text=" + quote(texto, safe="")
+        if not EMOJIS_NO_BOTAO_WHATSAPP:
+            texto = remover_emojis(texto)
+        link_wa = "https://api.whatsapp.com/send?text=" + quote(texto, safe="")
         if len(link_wa) <= 2000:
             break
     return json.dumps({
         "inline_keyboard": [
-            [{"text": "📲 Enviar para o WhatsApp", "url": link_wa}],
+            [{"text": "📋 Copiar texto (com ❌ ✅)",
+              "copy_text": {"text": texto_para_copiar(p)}}],
+            [{"text": "📲 Abrir WhatsApp (sem foto/emojis)", "url": link_wa}],
             [{"text": "🛒 Ver oferta na Shopee", "url": p["offerLink"]}],
         ]
     })
