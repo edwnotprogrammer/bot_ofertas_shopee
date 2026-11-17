@@ -21,6 +21,7 @@ import os
 import random
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
@@ -208,9 +209,9 @@ def postar_telegram(p: dict) -> bool:
 
 
 # ---------------- CÓPIA PARA WHATSAPP (manual) ----------------
-def montar_texto_whatsapp(p: dict) -> str:
+def montar_texto_whatsapp(p: dict, nome_max: int = 120) -> str:
     """Texto no formato do WhatsApp: *negrito*, ~riscado~."""
-    nome = p["productName"][:120]
+    nome = p["productName"][:nome_max]
     for simbolo in "*_~":
         nome = nome.replace(simbolo, "")
 
@@ -233,6 +234,22 @@ def montar_texto_whatsapp(p: dict) -> str:
     )
 
 
+def botao_copia_whatsapp(p: dict) -> str:
+    """Botões: abrir o WhatsApp com a mensagem pronta + ver a oferta."""
+    # O Telegram aceita links de até ~2000 caracteres; encurta o nome se precisar
+    for tamanho in (120, 80, 50, 30):
+        texto = montar_texto_whatsapp(p, tamanho)
+        link_wa = "https://wa.me/?text=" + quote(texto, safe="")
+        if len(link_wa) <= 2000:
+            break
+    return json.dumps({
+        "inline_keyboard": [
+            [{"text": "📲 Enviar para o WhatsApp", "url": link_wa}],
+            [{"text": "🛒 Ver oferta na Shopee", "url": p["offerLink"]}],
+        ]
+    })
+
+
 def enviar_copia_whatsapp(p: dict) -> None:
     """Manda foto + texto (sem formatação do Telegram) para o seu chat privado."""
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
@@ -242,7 +259,7 @@ def enviar_copia_whatsapp(p: dict) -> None:
             "chat_id": TG_CHAT_WA,
             "photo": p["imageUrl"],
             "caption": montar_texto_whatsapp(p),
-            "reply_markup": botao_oferta(p),
+            "reply_markup": botao_copia_whatsapp(p),
         },
         timeout=30,
     )
