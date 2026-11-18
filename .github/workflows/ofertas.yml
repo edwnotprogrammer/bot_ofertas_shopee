@@ -2,7 +2,7 @@ name: Bot de ofertas Shopee
 
 on:
   schedule:
-    - cron: "7 11,15,23 * * *"   # ~08h07, 12h07 e 20h07 de Brasília (UTC-3); pode atrasar alguns minutos
+    - cron: "7,27,47 11,15,23 * * *"   # tenta 3x em cada janela: ~08h, 12h e 20h de Brasília (UTC-3)
   workflow_dispatch:          # permite rodar manualmente pelo botão "Run workflow"
 
 permissions:
@@ -32,6 +32,7 @@ jobs:
         env:
           RODAR_UMA_VEZ: "1"
           INTERVALO_ENTRE_POSTS: "15"
+          MIN_MINUTOS_ENTRE_ENVIOS: ${{ github.event_name == 'schedule' && '90' || '0' }}
           SHOPEE_APP_ID: ${{ secrets.SHOPEE_APP_ID }}
           SHOPEE_SECRET: ${{ secrets.SHOPEE_SECRET }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
@@ -40,9 +41,9 @@ jobs:
 
       - name: Salvar histórico de postados
         run: |
-          if [ -f postados.json ]; then
-            git config user.name "bot-ofertas"
-            git config user.email "bot-ofertas@users.noreply.github.com"
-            git add postados.json
-            git diff --cached --quiet || (git commit -m "Atualiza histórico de postados" && git push)
-          fi
+          git config user.name "bot-ofertas"
+          git config user.email "bot-ofertas@users.noreply.github.com"
+          for f in postados.json ultimo_envio.json; do
+            [ -f "$f" ] && git add "$f"
+          done
+          git diff --cached --quiet || (git commit -m "Atualiza histórico de postados" && git push)
