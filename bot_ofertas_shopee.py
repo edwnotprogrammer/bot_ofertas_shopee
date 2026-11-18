@@ -64,6 +64,11 @@ PALAVRAS_CHAVE = [
 
 ARQUIVO_POSTADOS = Path("postados.json")
 
+# Trava: se já enviou ofertas há menos de X minutos, pula a rodada.
+# (0 = desligada). No GitHub Actions é ligada só nas execuções agendadas.
+MIN_MINUTOS_ENTRE_ENVIOS = int(os.getenv("MIN_MINUTOS_ENTRE_ENVIOS", "0"))
+ARQUIVO_ULTIMO_ENVIO = Path("ultimo_envio.json")
+
 
 # ---------------- SHOPEE ----------------
 def assinar_e_chamar(query: str) -> dict:
@@ -294,7 +299,20 @@ def enviar_copia_whatsapp(p: dict) -> None:
 
 
 # ---------------- LOOP PRINCIPAL ----------------
+def enviou_recentemente() -> bool:
+    if MIN_MINUTOS_ENTRE_ENVIOS <= 0 or not ARQUIVO_ULTIMO_ENVIO.exists():
+        return False
+    try:
+        ultimo = json.loads(ARQUIVO_ULTIMO_ENVIO.read_text())["ts"]
+    except (ValueError, KeyError):
+        return False
+    return (time.time() - ultimo) < MIN_MINUTOS_ENTRE_ENVIOS * 60
+
+
 def rodada() -> None:
+    if enviou_recentemente():
+        print("Já houve envio recente; pulando esta rodada.")
+        return
     postados = carregar_postados()
 
     # Busca cada categoria e ordena por vendas (mais vendidos primeiro)
@@ -328,6 +346,8 @@ def rodada() -> None:
             print(f"Postado: {p['productName'][:60]}")
             time.sleep(INTERVALO_ENTRE_POSTS)
 
+    if enviados:
+        ARQUIVO_ULTIMO_ENVIO.write_text(json.dumps({"ts": time.time()}))
     print(f"Rodada concluída: {enviados} oferta(s) postada(s).")
 
 
